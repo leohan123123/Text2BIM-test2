@@ -7,13 +7,23 @@ class BridgeAgent {
             ifc: null,
             dxf: null
         };
+        this.chatHistory = [];
+        this.processingResults = [];
+        this.availableModels = {
+            gpt: false,
+            claude: false,
+            gemini: false,
+            qwen: false
+        };
         this.init();
     }
 
     init() {
+        this.checkAPIStatus();
         this.setupFileUploads();
         this.setupChat();
         this.setupProcessing();
+        this.setupRAG();
         this.init3D();
     }
 
@@ -245,6 +255,91 @@ class BridgeAgent {
         chatMessages.scrollTop = chatMessages.scrollHeight;
         
         return messageId;
+    }
+    
+    setupRAG() {
+        const ragToggle = document.getElementById('rag-toggle');
+        const refreshBtn = document.getElementById('refresh-kb-btn');
+        
+        if (ragToggle) {
+            ragToggle.addEventListener('change', (e) => {
+                this.handleRAGToggle(e.target.checked);
+            });
+        }
+        
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => {
+                this.loadKnowledgeBaseStatus();
+            });
+        }
+    }
+    
+    handleRAGToggle(enabled) {
+        const kbPanel = document.getElementById('kb-status-panel');
+        
+        if (enabled && this.ragEnabled) {
+            kbPanel.style.display = 'block';
+            this.loadKnowledgeBaseStatus();
+            this.addChatMessage('system', '📚 RAG知识库已启用，将优先使用已上传的文档内容回答问题。');
+        } else {
+            kbPanel.style.display = 'none';
+            if (enabled && !this.ragEnabled) {
+                this.addChatMessage('system', '⚠️ RAG知识库未配置，将使用通用AI回答。');
+            } else {
+                this.addChatMessage('system', 'ℹ️ 已关闭RAG功能，将使用通用AI回答。');
+            }
+        }
+    }
+    
+    async loadKnowledgeBaseStatus() {
+        const contentDiv = document.getElementById('kb-status-content');
+        
+        try {
+            contentDiv.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>正在加载...';
+            
+            const response = await axios.get('/api/knowledge/status');
+            
+            if (response.data.success) {
+                const status = response.data.status;
+                const summary = response.data.summary;
+                
+                contentDiv.innerHTML = `
+                    <div class="space-y-2">
+                        <div class="text-sm">
+                            <strong>📊 知识库统计:</strong>
+                        </div>
+                        <div class="text-xs space-y-1 ml-4">
+                            <div>📝 向量数量: ${status.vectorCount.toLocaleString()}</div>
+                            <div>📁 文档数量: ${status.documentCount}</div>
+                            <div>📚 PDF规范: ${status.categories.documents}</div>
+                            <div>🏢 BIM模型: ${status.categories.models}</div>
+                            <div>📏 CAD图纸: ${status.categories.drawings}</div>
+                        </div>
+                        <div class="text-xs text-gray-500 mt-2">
+                            最后更新: ${new Date(status.lastUpdated).toLocaleString('zh-CN')}
+                        </div>
+                    </div>
+                `;
+                
+                this.knowledgeBaseStatus = status;
+            } else {
+                contentDiv.innerHTML = `
+                    <div class="text-yellow-600">
+                        <i class="fas fa-exclamation-triangle mr-2"></i>
+                        ${response.data.error || '知识库未配置'}
+                    </div>
+                `;
+            }
+            
+        } catch (error) {
+            console.error('加载知识库状态失败:', error);
+            contentDiv.innerHTML = `
+                <div class="text-red-600">
+                    <i class="fas fa-times-circle mr-2"></i>
+                    加载失败: ${error.message || '网络错误'}
+                </div>
+            `;
+        }
     }
 
     init3D() {

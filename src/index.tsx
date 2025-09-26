@@ -1,12 +1,25 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serveStatic } from 'hono/cloudflare-workers'
+import { AIService, type AIMessage } from './services/aiService'
+import { FileParsingService, type ParsingResult } from './services/fileParsingService'
+import { StorageService, type StorageResult } from './services/storageService'
+import { RAGService, type RAGResult } from './services/ragService'
+import { VectorService } from './services/vectorService'
 
 type Bindings = {
   DB?: D1Database;
   KV?: KVNamespace;
   R2?: R2Bucket;
   AI?: any;
+  // API Keys
+  OPENAI_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
+  GEMINI_API_KEY?: string;
+  QWEN_API_KEY?: string;
+  PINECONE_API_KEY?: string;
+  PINECONE_INDEX_URL?: string;
+  ENVIRONMENT?: string;
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -176,7 +189,7 @@ app.get('/', (c) => {
                     </div>
 
                     <!-- Model Selection -->
-                    <div class="bg-white rounded-xl shadow-lg p-6">
+                    <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
                         <h3 class="text-lg font-bold text-gray-800 mb-4 flex items-center">
                             <i class="fas fa-brain mr-3 text-yellow-500"></i>
                             AI 模型选择
@@ -200,10 +213,72 @@ app.get('/', (c) => {
                             </label>
                         </div>
                     </div>
+                    
+                    <!-- RAG Settings -->
+                    <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
+                        <h3 class="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-database mr-3 text-purple-500"></i>
+                            智能问答设置
+                        </h3>
+                        <div class="space-y-3">
+                            <label class="flex items-center justify-between">
+                                <span class="text-sm text-gray-700">启用RAG知识库</span>
+                                <input type="checkbox" id="rag-toggle" class="toggle-checkbox" checked>
+                            </label>
+                            <div class="text-xs text-gray-500">
+                                开启后将优先使用已上传的文档内容回答问题
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Knowledge Base Status -->
+                    <div class="bg-white rounded-xl shadow-lg p-6" id="kb-status-panel" style="display: none;">
+                        <h3 class="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-info-circle mr-3 text-blue-500"></i>
+                            知识库状态
+                        </h3>
+                        <div id="kb-status-content" class="text-sm text-gray-600">
+                            正在加载...
+                        </div>
+                        <button id="refresh-kb-btn" class="mt-3 text-sm text-blue-600 hover:text-blue-800">
+                            <i class="fas fa-refresh mr-1"></i>刷新状态
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
 
+        <!-- Custom Styles for Toggle -->
+        <style>
+        .toggle-checkbox {
+            appearance: none;
+            width: 50px;
+            height: 25px;
+            background: #d1d5db;
+            border-radius: 25px;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .toggle-checkbox:checked {
+            background: #3b82f6;
+        }
+        .toggle-checkbox::before {
+            content: '';
+            position: absolute;
+            width: 21px;
+            height: 21px;
+            border-radius: 50%;
+            background: white;
+            top: 2px;
+            left: 2px;
+            transition: transform 0.3s;
+        }
+        .toggle-checkbox:checked::before {
+            transform: translateX(25px);
+        }
+        </style>
+        
         <!-- Scripts -->
         <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
         <script src="/static/app.js"></script>
@@ -213,55 +288,400 @@ app.get('/', (c) => {
 })
 
 // API Routes
-app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', message: 'Bridge Agent API is running' })
+// File access API - 从R2获取文件
+app.get('/api/files/:key', async (c) => {
+  try {
+    const key = decodeURIComponent(c.req.param('key'))
+    const storageService = new StorageService(c.env)
+    
+    const fileObject = await storageService.getFile(key)
+    
+    if (!fileObject) {
+      return c.notFound()
+    }
+
+    return new Response(fileObject.body, {
+      headers: {
+        'Content-Type': fileObject.httpMetadata?.contentType || 'application/octet-stream',
+        'Content-Disposition': fileObject.httpMetadata?.contentDisposition || 'attachment',
+        'Cache-Control': 'public, max-age=31536000', // 1年缓存
+      }
+    })
+    
+  } catch (error) {
+    console.error('File access error:', error)
+    return c.json({ error: '文件访问失败' }, 500)
+  }
 })
 
-// File upload API
+// Knowledge Base API - 知识库管理
+app.get('/api/knowledge/status', async (c) => {
+  try {
+    const ragService = new RAGService(c.env)
+    const status = await ragService.getKnowledgeBaseStatus()
+    
+    if (!status) {
+      return c.json({
+        success: false,
+        error: '知识库未配置或无法访问',
+        configured: !!(c.env.PINECONE_API_KEY && c.env.PINECONE_INDEX_URL)
+      })
+    }
+    
+    return c.json({
+      success: true,
+      status,
+      summary: await ragService.generateKnowledgeSummary()
+    })
+    
+  } catch (error) {
+    return c.json({
+      success: false,
+      error: error instanceof Error ? error.message : '获取知识库状态失败'
+    }, 500)
+  }
+})
+
+app.post('/api/knowledge/search', async (c) => {
+  try {
+    const { query, maxResults = 10, fileTypes, minScore = 0.6 } = await c.req.json()
+    
+    if (!query) {
+      return c.json({ success: false, error: '搜索关键词不能为空' }, 400)
+    }
+    
+    const ragService = new RAGService(c.env)
+    const result = await ragService.searchKnowledgeBase(query, {
+      maxResults,
+      fileTypes,
+      minScore
+    })
+    
+    return c.json({
+      success: result.success,
+      matches: result.matches,
+      error: result.error
+    })
+    
+  } catch (error) {
+    return c.json({
+      success: false,
+      error: error instanceof Error ? error.message : '知识库搜索失败'
+    }, 500)
+  }
+})
+
+app.delete('/api/knowledge/:fileId', async (c) => {
+  try {
+    const fileId = c.req.param('fileId')
+    
+    const ragService = new RAGService(c.env)
+    const result = await ragService.removeFromKnowledgeBase(fileId)
+    
+    return c.json({
+      success: result.success,
+      error: result.error
+    })
+    
+  } catch (error) {
+    return c.json({
+      success: false,
+      error: error instanceof Error ? error.message : '从知识库删除文件失败'
+    }, 500)
+  }
+})
+
+app.get('/api/health', (c) => {
+  const hasAnyApiKey = !!(c.env.OPENAI_API_KEY || c.env.ANTHROPIC_API_KEY || c.env.GEMINI_API_KEY || c.env.QWEN_API_KEY)
+  
+  const hasR2 = !!c.env.R2
+  const hasPinecone = !!(c.env.PINECONE_API_KEY && c.env.PINECONE_INDEX_URL)
+  
+  return c.json({ 
+    status: 'ok', 
+    message: 'Bridge Agent API is running',
+    environment: c.env.ENVIRONMENT || 'unknown',
+    services: {
+      ai: hasAnyApiKey,
+      storage: hasR2,
+      parsing: true,
+      rag: hasPinecone,
+      vector: hasPinecone
+    },
+    availableModels: {
+      gpt: !!c.env.OPENAI_API_KEY,
+      claude: !!c.env.ANTHROPIC_API_KEY,
+      gemini: !!c.env.GEMINI_API_KEY,
+      qwen: !!c.env.QWEN_API_KEY
+    },
+    supportedFormats: ['pdf', 'ifc', 'dxf'],
+    features: {
+      ragEnabled: hasPinecone,
+      knowledgeBase: hasPinecone,
+      semanticSearch: hasPinecone
+    }
+  })
+})
+
+// File upload API - 真实文件上传和解析
 app.post('/api/upload', async (c) => {
   try {
-    // This would integrate with file processing services
-    return c.json({ 
-      success: true, 
-      message: 'File uploaded successfully',
-      fileId: 'temp-id-' + Date.now()
+    const formData = await c.req.formData()
+    const file = formData.get('file') as File
+    
+    if (!file) {
+      return c.json({ success: false, error: '没有找到上传的文件' }, 400)
+    }
+
+    // 验证文件类型
+    const allowedTypes = ['pdf', 'ifc', 'dxf']
+    const fileType = file.name.toLowerCase().split('.').pop()
+    
+    if (!fileType || !allowedTypes.includes(fileType)) {
+      return c.json({ 
+        success: false, 
+        error: '不支持的文件类型，请上传PDF、IFC或DXF文件' 
+      }, 400)
+    }
+
+    // 验证文件大小（限制100MB）
+    if (file.size > 100 * 1024 * 1024) {
+      return c.json({ 
+        success: false, 
+        error: '文件大小超过100MB限制' 
+      }, 400)
+    }
+
+    // 初始化服务
+    const storageService = new StorageService(c.env)
+    const parsingService = new FileParsingService(c.env)
+
+    // 上传文件到R2存储
+    const uploadResult = await storageService.uploadFile(file, {
+      userId: 'anonymous', // 实际应用中从认证中获取
+      projectId: 'default'
     })
+
+    if (!uploadResult.success) {
+      return c.json({ 
+        success: false, 
+        error: uploadResult.error || '文件上传失败' 
+      }, 500)
+    }
+
+    // 解析文件内容
+    const parsingResult = await parsingService.parseFile(file)
+    
+    if (!parsingResult.success) {
+      console.error('文件解析失败:', parsingResult.error)
+      // 即使解析失败，也返回上传成功，但标记解析状态
+    }
+
+    return c.json({
+      success: true,
+      message: '文件上传成功',
+      fileId: uploadResult.key,
+      fileUrl: uploadResult.url,
+      fileName: file.name,
+      fileType: fileType,
+      fileSize: file.size,
+      parsing: {
+        success: parsingResult.success,
+        content: parsingResult.content,
+        error: parsingResult.error
+      }
+    })
+
   } catch (error) {
-    return c.json({ success: false, error: 'Upload failed' }, 500)
+    console.error('Upload API error:', error)
+    return c.json({ 
+      success: false, 
+      error: error instanceof Error ? error.message : '上传服务出现未知错误' 
+    }, 500)
   }
 })
 
-// Chat API
+// Chat API - 集成RAG智能问答
 app.post('/api/chat', async (c) => {
   try {
-    const { message, model } = await c.req.json()
+    const { message, model, history = [], useRAG = true } = await c.req.json()
     
-    // This would integrate with selected LLM APIs
-    const response = `[${model}] 我收到了您的消息: "${message}"。目前这是一个演示响应。在完整实现中，这里将连接到真实的AI模型进行桥梁相关的专业回答。`
+    if (!message || typeof message !== 'string') {
+      return c.json({ success: false, error: '消息内容不能为空' }, 400)
+    }
+
+    // 初始化服务
+    const ragService = new RAGService(c.env)
     
-    return c.json({ 
-      success: true, 
-      response,
-      model 
-    })
+    let response: any;
+    
+    if (useRAG) {
+      // 使用RAG系统回答
+      const conversationHistory: AIMessage[] = history.map((h: any) => ({
+        role: h.role as 'user' | 'assistant',
+        content: h.content
+      }));
+      
+      const ragResult = await ragService.askQuestion(message, model, {
+        maxSources: 5,
+        minRelevanceScore: 0.7,
+        conversationHistory
+      });
+      
+      response = {
+        success: ragResult.success,
+        response: ragResult.answer,
+        model: ragResult.model,
+        sources: ragResult.sources,
+        error: ragResult.error,
+        ragEnabled: true
+      };
+    } else {
+      // 直接使用AI模型
+      const aiService = new AIService(c.env)
+      
+      const messages: AIMessage[] = [
+        ...history.map((h: any) => ({
+          role: h.role as 'user' | 'assistant',
+          content: h.content
+        })),
+        {
+          role: 'user' as const,
+          content: aiService.enhanceBridgeQuery(message)
+        }
+      ]
+      
+      const aiResponse = await aiService.chat(messages, model)
+      
+      response = {
+        success: aiResponse.success,
+        response: aiResponse.response,
+        model: aiResponse.model,
+        usage: aiResponse.usage,
+        error: aiResponse.error,
+        ragEnabled: false
+      };
+    }
+    
+    if (!response.success) {
+      return c.json({ 
+        success: false, 
+        error: response.error || 'AI服务调用失败',
+        model: response.model
+      }, 500)
+    }
+    
+    return c.json(response)
   } catch (error) {
-    return c.json({ success: false, error: 'Chat failed' }, 500)
+    console.error('Chat API error:', error)
+    return c.json({ 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Chat服务出现未知错误'
+    }, 500)
   }
 })
 
-// File processing API
+// File processing API - 批量处理已上传的文件
 app.post('/api/process', async (c) => {
   try {
-    const { fileIds } = await c.req.json()
+    const { fileIds, options = {} } = await c.req.json()
     
-    // This would integrate with file processing pipeline
-    return c.json({ 
-      success: true, 
-      message: 'Processing started',
-      processingId: 'proc-' + Date.now()
+    if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+      return c.json({ success: false, error: '请提供要处理的文件ID列表' }, 400)
+    }
+
+    const storageService = new StorageService(c.env)
+    const parsingService = new FileParsingService(c.env)
+    const aiService = new AIService(c.env)
+    
+    const processingResults = []
+    const processingId = 'proc-' + Date.now()
+    
+    for (const fileId of fileIds) {
+      try {
+        // 从存储获取文件
+        const fileObject = await storageService.getFile(fileId)
+        
+        if (!fileObject) {
+          processingResults.push({
+            fileId,
+            success: false,
+            error: '文件未找到'
+          })
+          continue
+        }
+
+        // 重新解析文件（如果需要）
+        const fileName = fileObject.customMetadata?.originalName || fileId
+        const fileBuffer = await fileObject.arrayBuffer()
+        const file = new File([fileBuffer], fileName)
+        
+        const parsingResult = await parsingService.parseFile(file)
+        
+        if (parsingResult.success && parsingResult.content) {
+          // 增强内容处理
+          const enhancedContent = parsingService.enhanceContentForBridge(
+            parsingResult.content, 
+            parsingResult.fileType
+          )
+          
+          // 添加到知识库（如果配置了向量数据库）
+          let vectorResult = null;
+          if (c.env.PINECONE_API_KEY && enhancedContent.text) {
+            const ragService = new RAGService(c.env)
+            vectorResult = await ragService.addToKnowledgeBase(
+              fileId,
+              parsingResult.fileName,
+              parsingResult.fileType,
+              enhancedContent.text,
+              enhancedContent.metadata
+            )
+          }
+          
+          processingResults.push({
+            fileId,
+            success: true,
+            fileName: parsingResult.fileName,
+            fileType: parsingResult.fileType,
+            content: enhancedContent,
+            metadata: fileObject.customMetadata,
+            vectorStorage: vectorResult
+          })
+        } else {
+          processingResults.push({
+            fileId,
+            success: false,
+            error: parsingResult.error
+          })
+        }
+        
+      } catch (error) {
+        processingResults.push({
+          fileId,
+          success: false,
+          error: error instanceof Error ? error.message : '处理失败'
+        })
+      }
+    }
+    
+    return c.json({
+      success: true,
+      message: '文件处理完成',
+      processingId,
+      results: processingResults,
+      summary: {
+        total: fileIds.length,
+        successful: processingResults.filter(r => r.success).length,
+        failed: processingResults.filter(r => !r.success).length
+      }
     })
+    
   } catch (error) {
-    return c.json({ success: false, error: 'Processing failed' }, 500)
+    console.error('Processing API error:', error)
+    return c.json({ 
+      success: false, 
+      error: error instanceof Error ? error.message : '处理服务出现未知错误' 
+    }, 500)
   }
 })
 
