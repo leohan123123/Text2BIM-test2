@@ -135,8 +135,12 @@ export class RAGService {
       // 增强桥梁专业内容
       const enhancedContent = this.enhanceBridgeContent(content, metadata);
       
-      // 存储到向量数据库
-      const result = await this.vectorService.storeDocument(
+      console.log('RAG: 原始内容:', content);
+      console.log('RAG: 增强内容:', enhancedContent);
+      console.log('RAG: 调用向量服务...');
+      
+      // 直接调用本地存储，因为没有Pinecone配置
+      const result = await (this.vectorService as any).storeDocumentLocal(
         fileId,
         fileName,
         fileType,
@@ -148,9 +152,11 @@ export class RAGService {
         }
       );
 
+      console.log('RAG: 向量服务结果:', result);
       return result;
 
     } catch (error) {
+      console.error('RAG: 添加到知识库失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : '添加到知识库失败'
@@ -217,17 +223,23 @@ export class RAGService {
   ): Promise<QueryResult> {
     const { maxResults = 10, fileTypes, minScore = 0.6 } = options;
     
+    console.log('RAG搜索: 查询:', query, '选项:', options);
+    
     // 构建过滤器
     let filter: any = {};
     if (fileTypes && fileTypes.length > 0) {
-      filter.fileType = { '$in': fileTypes };
+      filter.fileType = fileTypes; // 简化过滤器，因为本地实现
     }
 
-    const result = await this.vectorService.queryDocuments(query, maxResults, filter);
+    // 直接使用本地查询
+    const result = await (this.vectorService as any).queryDocumentsLocal(query, maxResults, filter);
+    
+    console.log('RAG搜索结果:', result);
     
     if (result.success && result.matches) {
       // 过滤低分结果
       result.matches = result.matches.filter(match => match.score >= minScore);
+      console.log('过滤后结果数量:', result.matches.length);
     }
     
     return result;
@@ -310,11 +322,11 @@ ${contextText}
 
     // 添加元数据信息
     if (metadata.contentType) {
-      enhancedContent = `[文档类型: ${metadata.contentType}]\\n${enhancedContent}`;
+      enhancedContent = `[文档类型: ${metadata.contentType}]\n${enhancedContent}`;
     }
 
     if (metadata.bridgeTermsFound && metadata.bridgeTermsFound.length > 0) {
-      enhancedContent = `[包含术语: ${metadata.bridgeTermsFound.join(', ')}]\\n${enhancedContent}`;
+      enhancedContent = `[包含术语: ${metadata.bridgeTermsFound.join(', ')}]\n${enhancedContent}`;
     }
 
     return enhancedContent;
@@ -329,12 +341,12 @@ ${contextText}
         return '知识库状态未知，可能未正确配置向量数据库。';
       }
 
-      let summary = `桥梁智能体知识库状态:\\n\\n`;
-      summary += `📊 总向量数: ${status.vectorCount}\\n`;
-      summary += `📁 文档数量: ${status.documentCount}\\n`;
-      summary += `📄 规范文档: ${status.categories.documents}\\n`;
-      summary += `🏗️ BIM模型: ${status.categories.models}\\n`;
-      summary += `📐 CAD图纸: ${status.categories.drawings}\\n`;
+      let summary = `桥梁智能体知识库状态:\n\n`;
+      summary += `📊 总向量数: ${status.vectorCount}\n`;
+      summary += `📁 文档数量: ${status.documentCount}\n`;
+      summary += `📄 规范文档: ${status.categories.documents}\n`;
+      summary += `🏗️ BIM模型: ${status.categories.models}\n`;
+      summary += `📐 CAD图纸: ${status.categories.drawings}\n`;
       summary += `🕐 最后更新: ${new Date(status.lastUpdated).toLocaleString('zh-CN')}`;
 
       return summary;

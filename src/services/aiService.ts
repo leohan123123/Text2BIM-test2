@@ -46,9 +46,44 @@ export class AIService {
           throw new Error(`不支持的模型: ${model}`);
       }
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '未知错误';
+      
+      // 如果是OpenAI配额不足错误，尝试自动切换到其他可用模型
+      if (model === 'gpt' && errorMessage.includes('insufficient_quota')) {
+        console.log('OpenAI配额不足，尝试使用其他模型...');
+        
+        // 尝试使用Gemini模型作为备选
+        if (this.geminiApiKey) {
+          try {
+            const fallbackResult = await this.chatWithGemini(messages);
+            return {
+              ...fallbackResult,
+              model: fallbackResult.model + ' (OpenAI降级)',
+              response: `[自动切换至Gemini模型] ${fallbackResult.response}`
+            };
+          } catch (geminiError) {
+            // Gemini也失败了，继续原错误
+          }
+        }
+        
+        // 尝试使用Claude作为备选
+        if (this.anthropicApiKey) {
+          try {
+            const fallbackResult = await this.chatWithClaude(messages);
+            return {
+              ...fallbackResult,
+              model: fallbackResult.model + ' (OpenAI降级)',
+              response: `[自动切换至Claude模型] ${fallbackResult.response}`
+            };
+          } catch (claudeError) {
+            // Claude也失败了，继续原错误
+          }
+        }
+      }
+      
       return {
         success: false,
-        error: error instanceof Error ? error.message : '未知错误',
+        error: errorMessage,
         model
       };
     }
@@ -91,6 +126,12 @@ export class AIService {
 
     if (!response.ok) {
       const errorData = await response.json();
+      
+      // 检查是否为配额超出错误
+      if (errorData.error?.code === 'insufficient_quota') {
+        throw new Error(`OpenAI API配额不足: ${errorData.error.message}。建议: 1)充值OpenAI账户 2)使用其他AI模型(Claude/Gemini/Qwen) 3)稍后再试`);
+      }
+      
       throw new Error(`OpenAI API错误: ${errorData.error?.message || '请求失败'}`);
     }
 

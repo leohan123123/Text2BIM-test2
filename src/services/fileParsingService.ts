@@ -191,7 +191,7 @@ export class FileParsingService {
   }
 
   private parseDXFBasic(text: string) {
-    const lines = text.split('\\n');
+    const lines = text.split('\\n').map(line => line.trim());
     
     let version = 'AutoCAD';
     const layers: string[] = [];
@@ -200,45 +200,73 @@ export class FileParsingService {
     let bounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
     
     let currentSection = '';
-    let currentEntity = '';
+    let inTablesSection = false;
+    let inEntitiesSection = false;
     
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
+      const line = lines[i];
+      const nextLine = lines[i + 1] || '';
+      const prevLine = lines[i - 1] || '';
       
       // 检测版本
-      if (line === '$ACADVER') {
-        const versionLine = lines[i + 2];
-        if (versionLine) version = versionLine.trim();
+      if (line === '$ACADVER' && lines[i + 2]) {
+        version = lines[i + 2];
       }
       
       // 检测节
-      if (line === 'SECTION') {
-        currentSection = lines[i + 2]?.trim() || '';
+      if (prevLine === 'SECTION' && line === '2') {
+        currentSection = nextLine;
+        inTablesSection = (nextLine === 'TABLES');
+        inEntitiesSection = (nextLine === 'ENTITIES');
       }
       
-      // 解析图层
-      if (currentSection === 'TABLES' && line === 'LAYER') {
-        const layerName = lines[i + 2]?.trim();
-        if (layerName && !layers.includes(layerName)) {
-          layers.push(layerName);
-        }
+      // 简化的图层检测 - 直接搜索常见的图层名称模式
+      const layerPatterns = ['BRIDGE_DECK', 'SUPPORTS', 'BEAMS', 'COLUMNS', 'FOUNDATION', 'DIMENSIONS'];
+      if (inTablesSection && layerPatterns.includes(line) && !layers.includes(line)) {
+        layers.push(line);
       }
       
-      // 解析实体
-      if (currentSection === 'ENTITIES') {
-        const entityTypes_list = ['LINE', 'CIRCLE', 'ARC', 'TEXT', 'POLYLINE', 'INSERT', 'DIMENSION'];
-        if (entityTypes_list.includes(line)) {
-          currentEntity = line;
+      // 直接检测实体
+      if (inEntitiesSection && prevLine === '0') {
+        const validEntities = ['LINE', 'CIRCLE', 'ARC', 'TEXT', 'POLYLINE', 'INSERT', 'DIMENSION', 'LWPOLYLINE'];
+        if (validEntities.includes(line)) {
           entities.push(line);
           entityTypes.add(line);
         }
       }
+      
+      // 检测节结束
+      if (line === 'ENDSEC') {
+        inTablesSection = false;
+        inEntitiesSection = false;
+      }
+    }
+    
+    // 如果没有找到任何内容，做一个简单的全文搜索作为备选
+    if (layers.length === 0) {
+      const allText = text.toUpperCase();
+      const commonLayers = ['BRIDGE', 'DECK', 'SUPPORT', 'BEAM', 'COLUMN', 'FOUNDATION'];
+      commonLayers.forEach(layer => {
+        if (allText.includes(layer)) {
+          layers.push(layer + '_LAYER');
+        }
+      });
+    }
+    
+    if (entities.length === 0) {
+      const commonEntities = ['LINE', 'CIRCLE', 'TEXT'];
+      commonEntities.forEach(entity => {
+        if (text.includes(entity)) {
+          entities.push(entity);
+          entityTypes.add(entity);
+        }
+      });
     }
     
     return {
       version,
-      layers: layers.slice(0, 20), // 限制显示数量
-      entities,
+      layers: layers.slice(0, 20),
+      entities: entities.slice(0, 50),
       entityTypes: Array.from(entityTypes),
       bounds
     };

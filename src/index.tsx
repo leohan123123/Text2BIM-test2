@@ -371,6 +371,41 @@ app.post('/api/knowledge/search', async (c) => {
   }
 })
 
+// 添加文档到RAG知识库
+app.post('/api/rag/add-document', async (c) => {
+  try {
+    const { fileId, fileName, fileType, content, metadata } = await c.req.json()
+    
+    if (!fileId || !fileName || !fileType || !content) {
+      return c.json({
+        success: false,
+        error: '缺少必需的字段: fileId, fileName, fileType, content'
+      }, 400)
+    }
+    
+    const ragService = new RAGService(c.env)
+    const result = await ragService.addToKnowledgeBase(
+      fileId,
+      fileName, 
+      fileType,
+      content,
+      metadata
+    )
+    
+    return c.json({
+      success: result.success,
+      vectorCount: result.vectorCount,
+      error: result.error
+    })
+    
+  } catch (error) {
+    return c.json({
+      success: false,
+      error: error instanceof Error ? error.message : '添加文档到知识库失败'
+    }, 500)
+  }
+})
+
 app.delete('/api/knowledge/:fileId', async (c) => {
   try {
     const fileId = c.req.param('fileId')
@@ -388,6 +423,65 @@ app.delete('/api/knowledge/:fileId', async (c) => {
       success: false,
       error: error instanceof Error ? error.message : '从知识库删除文件失败'
     }, 500)
+  }
+})
+
+// 调试API - 测试RAG服务
+app.post('/api/debug/vector', async (c) => {
+  try {
+    const { content } = await c.req.json();
+    
+    if (!content) {
+      return c.json({ error: '需要提供content字段' }, 400);
+    }
+    
+    const ragService = new RAGService(c.env);
+    
+    // 直接调用RAG服务的addToKnowledgeBase方法
+    const ragResult = await ragService.addToKnowledgeBase(
+      'debug_rag_test',
+      'debug.txt',
+      'txt',
+      content,
+      { debug: true }
+    );
+    
+    return c.json({
+      success: true,
+      ragResult: ragResult,
+      content: content
+    });
+    
+  } catch (error) {
+    return c.json({
+      success: false,
+      error: error instanceof Error ? error.message : '调试失败',
+      stack: error instanceof Error ? error.stack : undefined
+    }, 500);
+  }
+})
+
+// 调试API - 检查本地向量存储状态
+app.get('/api/debug/vectors', (c) => {
+  try {
+    const vectorService = new VectorService(c.env);
+    const stats = (vectorService as any).getLocalStats();
+    return c.json({
+      success: true,
+      stats: stats,
+      vectorStore: (vectorService as any).localVectorStore.length > 0 ? 
+        (vectorService as any).localVectorStore.map((v: any) => ({
+          id: v.id,
+          fileName: v.metadata.fileName,
+          content: v.metadata.content.substring(0, 100) + '...',
+          vectorDimension: v.values.length
+        })) : []
+    });
+  } catch (error) {
+    return c.json({
+      success: false,
+      error: error instanceof Error ? error.message : '获取向量存储状态失败'
+    }, 500);
   }
 })
 

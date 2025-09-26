@@ -27,6 +27,68 @@ class BridgeAgent {
         this.init3D();
     }
 
+    async checkAPIStatus() {
+        try {
+            const response = await axios.get('/api/health');
+            const data = response.data;
+            
+            if (data.availableModels) {
+                this.availableModels = data.availableModels;
+                this.updateModelSelection();
+            }
+            
+            // 检查RAG功能
+            if (data.features && data.features.ragEnabled) {
+                this.ragEnabled = true;
+                this.loadKnowledgeBaseStatus();
+            }
+            
+            // 显示API配置状态
+            let statusMessage = '';
+            if (!data.services.ai) {
+                statusMessage = '⚠️ AI API未配置，目前使用模拟模式。';
+            } else {
+                statusMessage = '🤖 AI服务已正常启动。';
+            }
+            
+            if (data.services.rag) {
+                statusMessage += '\n📚 RAG知识库已启用，可以基于上传文档进行智能问答。';
+            } else {
+                statusMessage += '\n⚠️ RAG知识库未配置，将使用通用AI回答。';
+            }
+            
+            this.addChatMessage('system', statusMessage);
+        } catch (error) {
+            console.error('API status check failed:', error);
+            this.addChatMessage('system', '⚠️ API状态检查失败，请检查网络连接。');
+        }
+    }
+
+    updateModelSelection() {
+        const modelInputs = document.querySelectorAll('input[name="model"]');
+        modelInputs.forEach(input => {
+            const model = input.value;
+            const label = input.closest('label');
+            
+            if (this.availableModels[model]) {
+                input.disabled = false;
+                label.style.opacity = '1';
+                label.title = '此模型已配置可用';
+            } else {
+                input.disabled = true;
+                label.style.opacity = '0.5';
+                label.title = '此模型未配置API密钥';
+            }
+        });
+        
+        // 选择第一个可用的模型
+        const availableModel = Object.keys(this.availableModels).find(model => this.availableModels[model]);
+        if (availableModel) {
+            const input = document.querySelector(`input[name="model"][value="${availableModel}"]`);
+            if (input) input.checked = true;
+        }
+    }
+
     setupFileUploads() {
         // PDF Upload
         const pdfUpload = document.getElementById('pdf-upload');
